@@ -102,6 +102,45 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
     }
 }
 
+fn ufw(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("ufw").args(args).output().map_err(|e| format!("ufw: {e}"))?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(text.trim().to_string())
+    }
+}
+
+/// Always add `ufw allow <port>/tcp`, whether ufw is active or not (an inactive ufw keeps the
+/// rule and applies it once enabled). ufw is installed when missing but never enabled here.
+fn open_firewall(port: u16) -> Result<String, String> {
+    if !crate::exec::which("ufw") {
+        if !crate::exec::which("apt-get") {
+            return Err("ufw is not installed and apt-get is not available".into());
+        }
+        println!("      ufw not found — installing it (it will NOT be enabled)");
+        let ok = Command::new("apt-get")
+            .args(["install", "-y", "-qq", "ufw"])
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return Err("could not install ufw".into());
+        }
+    }
+    let rule = format!("{port}/tcp");
+    let rule_s = rule.as_str();
+    ufw(&["allow", rule_s, "comment", "MySSH-MCP"]).or_else(|_| ufw(&["allow", rule_s]))?;
+    let active = ufw(&["status"]).map(|s| s.contains("Status: active")).unwrap_or(false);
+    Ok(if active {
+        format!("ufw allow {rule} added (ufw is active — port is open)")
+    } else {
+        format!("ufw allow {rule} added (ufw is inactive — the rule applies as soon as ufw is enabled)")
+    })
+}
+
 fn unit_text(config_path: &str) -> String {
     format!(
         "[Unit]
@@ -148,9 +187,14 @@ fn logrotate_text(log_file: &str) -> String {
     )
 }
 
-fn host_of(url: &str) -> String {
+/// `http://10.50.0.1:4040/mcp` -> `10.50.0.1:4040`
+fn hostport_of(url: &str) -> String {
     let rest = url.split("://").nth(1).unwrap_or(url);
-    let hostport = rest.split('/').next().unwrap_or(rest);
+    rest.split('/').next().unwrap_or(rest).to_string()
+}
+
+fn host_of(url: &str) -> String {
+    let hostport = hostport_of(url);
     if let Some(stripped) = hostport.strip_prefix('[') {
         return stripped.split(']').next().unwrap_or(stripped).to_string();
     }
@@ -162,6 +206,7 @@ const KEY_FILE_TEMPLATE: &str = r#"=============================================
   Generated: __DATE__
 ==========================================================================
 
+SERVER=__SERVER__
 API_KEY=__KEY__
 MCP_URL=__URL__
 
@@ -248,7 +293,8 @@ curl -s __URL__ \
 * Plain HTTP sends the key unencrypted. For use over the internet put HTTPS
   in front (e.g. Caddy: `reverse_proxy 127.0.0.1:__PORT__` and set
   bind = "127.0.0.1" in the config) or use the SSH method (5).
-* Open the port in your firewall only if you use HTTP:  ufw allow __PORT__/tcp
+* Setup already ran `ufw allow __PORT__/tcp`. If your VPS provider has its own
+  firewall / security group, open TCP __PORT__ there too.
 * 10 wrong keys within 10 minutes => that IP is banned for 15 minutes.
 * Tools: execute_command, read_file, write_file, list_directory, system_info,
   service_control, docker, database_query.
@@ -259,6 +305,7 @@ fn key_file_text(key: &str, cfg: &Config) -> String {
     KEY_FILE_TEMPLATE
         .replace("__DATE__", &crate::audit::now_stamp())
         .replace("__KEY__", key)
+        .replace("__SERVER__", &hostport_of(&url))
         .replace("__URL__", &url)
         .replace("__HOST__", &host_of(&url))
         .replace("__PORT__", &cfg.server.port.to_string())
@@ -290,7 +337,7 @@ pub fn run_setup(o: SetupOpts) -> Result<(), String> {
         .parse::<std::net::IpAddr>()
         .map_err(|_| format!("invalid --bind address `{}`", cfg.server.bind))?;
 
-    println!("[1/6] Creating directories and audit log");
+    println!("[1/7] Creating directories and audit log");
     private_dir(config::CONFIG_DIR)?;
     let log = cfg.logging.log_file.clone();
     if let Some(dir) = Path::new(&log).parent() {
@@ -299,10 +346,10 @@ pub fn run_setup(o: SetupOpts) -> Result<(), String> {
     touch_private(&log)?;
     private_dir(config::BACKUP_DIR)?;
 
-    println!("[2/6] Installing binary to {}", config::BINARY_PATH);
+    println!("[2/7] Installing binary to {}", config::BINARY_PATH);
     install_binary()?;
 
-    println!("[3/6] Preparing API key");
+    println!("[3/7] Preparing API key");
     let existing = if o.new_key {
         None
     } else {
@@ -321,19 +368,26 @@ pub fn run_setup(o: SetupOpts) -> Result<(), String> {
         cfg.server.public_url = format!("http://{host}:{}/mcp", cfg.server.port);
     }
 
-    println!("[4/6] Writing {}", o.config_path);
+    println!("[4/7] Writing {}", o.config_path);
     write_with_mode(&o.config_path, &config::render_config(&cfg), 0o600)?;
     write_with_mode(config::API_KEY_FILE, &key_file_text(&key, &cfg), 0o600)?;
 
-    println!("[5/6] Installing systemd service + log rotation");
+    println!("[5/7] Installing systemd service + log rotation");
     write_with_mode(config::UNIT_PATH, &unit_text(&o.config_path), 0o644)?;
     write_with_mode(config::LOGROTATE_PATH, &logrotate_text(&log), 0o644)?;
 
+    println!("[6/7] Opening port {}/tcp in ufw", cfg.server.port);
+    let firewall = match open_firewall(cfg.server.port) {
+        Ok(msg) => msg,
+        Err(e) => format!("WARNING: could not add the ufw rule ({e}) — run:  ufw allow {}/tcp", cfg.server.port),
+    };
+    println!("      {firewall}");
+
     if o.no_start {
-        println!("[6/6] Skipping service start (--no-start)");
+        println!("[7/7] Skipping service start (--no-start)");
         systemctl(&["daemon-reload"])?;
     } else {
-        println!("[6/6] Enabling and starting {}", config::SERVICE_NAME);
+        println!("[7/7] Enabling and starting {}", config::SERVICE_NAME);
         restart_service()?;
     }
 
@@ -341,7 +395,9 @@ pub fn run_setup(o: SetupOpts) -> Result<(), String> {
     println!("==================================================================");
     println!(" MySSH-MCP is installed{}", if o.no_start { "" } else { " and running" });
     println!("==================================================================");
+    println!(" Server    : {}", hostport_of(&cfg.server.public_url));
     println!(" MCP URL   : {}", cfg.server.public_url);
+    println!(" Firewall  : {firewall}");
     println!(
         " API key   : {} ({})",
         config::API_KEY_FILE,
@@ -378,19 +434,23 @@ mod tests {
 
     #[test]
     fn host_extraction() {
-        assert_eq!(host_of("http://1.2.3.4:8765/mcp"), "1.2.3.4");
+        assert_eq!(host_of("http://10.50.0.1:4040/mcp"), "10.50.0.1");
+        assert_eq!(hostport_of("http://10.50.0.1:4040/mcp"), "10.50.0.1:4040");
         assert_eq!(host_of("https://mcp.example.com/mcp"), "mcp.example.com");
-        assert_eq!(host_of("http://[2001:db8::1]:8765/mcp"), "2001:db8::1");
+        assert_eq!(host_of("http://[2001:db8::1]:4040/mcp"), "2001:db8::1");
     }
 
     #[test]
     fn key_file_contains_everything() {
         let mut cfg = Config::default();
-        cfg.server.public_url = "http://1.2.3.4:8765/mcp".into();
+        cfg.server.public_url = "http://10.50.0.1:4040/mcp".into();
         let t = key_file_text("msmcp_abc", &cfg);
+        assert!(t.contains("SERVER=10.50.0.1:4040"));
         assert!(t.contains("API_KEY=msmcp_abc"));
+        assert!(t.contains("MCP_URL=http://10.50.0.1:4040/mcp"));
+        assert!(t.contains("ufw allow 4040/tcp"));
         assert!(t.contains("claude mcp add --transport http"));
-        assert!(t.contains("root@1.2.3.4"));
+        assert!(t.contains("root@10.50.0.1"));
         assert!(!t.contains("__"));
     }
 }

@@ -43,7 +43,7 @@ enum Cmd {
         /// Listen address (0.0.0.0 = public, 127.0.0.1 = behind a reverse proxy / tunnel)
         #[arg(long)]
         bind: Option<String>,
-        /// Listen port (default 8765)
+        /// Listen port (default 4040); setup always runs `ufw allow <port>/tcp`
         #[arg(long)]
         port: Option<u16>,
         /// Public IP or hostname written into the connection guide

@@ -4,8 +4,9 @@
 #
 #  Builds the Rust binary, installs it to /usr/local/bin/myssh-mcp, generates the
 #  API key (/home/MCP_MySSH_APIKey.txt), writes /etc/myssh-mcp/config.toml and
-#  enables the systemd service `myssh-mcp` (runs as root, starts on boot).
-#  Re-running it upgrades in place and keeps the existing API key.
+#  enables the systemd service `myssh-mcp` (runs as root, starts on boot) and
+#  always adds `ufw allow <port>/tcp` (default port 4040), whether ufw is active
+#  or not. Re-running it upgrades in place and keeps the existing API key.
 # =============================================================================
 set -euo pipefail
 
@@ -13,20 +14,18 @@ PORT=""
 BIND=""
 PUBLIC_HOST=""
 NEW_KEY=0
-OPEN_FW=0
 TMP_SWAP=""
 
 usage() {
   cat <<'EOF'
 Usage: sudo ./install.sh [options]
 
-  --port N             listen port (default 8765)
+  --port N             listen port (default 4040; opened with `ufw allow N/tcp`)
   --bind ADDR          listen address (default 0.0.0.0; use 127.0.0.1 behind a
                        reverse proxy or when you only connect through SSH)
   --public-host HOST   public IP / hostname written into the connection guide
                        (auto-detected when omitted)
   --new-key            generate a new API key (default: keep the existing one)
-  --open-firewall      run `ufw allow PORT/tcp` when ufw is active
   -h, --help           show this help
 EOF
 }
@@ -37,7 +36,6 @@ while [ $# -gt 0 ]; do
     --bind)          BIND="${2:?--bind needs a value}"; shift 2 ;;
     --public-host)   PUBLIC_HOST="${2:?--public-host needs a value}"; shift 2 ;;
     --new-key)       NEW_KEY=1; shift ;;
-    --open-firewall) OPEN_FW=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     *)               echo "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -119,7 +117,7 @@ cargo build --release
 echo "==> [4/5] Installing the binary to /usr/local/bin/myssh-mcp"
 install -m 0755 target/release/myssh-mcp /usr/local/bin/myssh-mcp
 
-echo "==> [5/5] Running setup (API key, config, systemd service, log rotation)"
+echo "==> [5/5] Running setup (API key, config, ufw rule, systemd service, log rotation)"
 SETUP_ARGS=()
 if [ -n "$PORT" ]; then SETUP_ARGS+=(--port "$PORT"); fi
 if [ -n "$BIND" ]; then SETUP_ARGS+=(--bind "$BIND"); fi
@@ -127,25 +125,8 @@ if [ -n "$PUBLIC_HOST" ]; then SETUP_ARGS+=(--public-host "$PUBLIC_HOST"); fi
 if [ "$NEW_KEY" = 1 ]; then SETUP_ARGS+=(--new-key); fi
 /usr/local/bin/myssh-mcp setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
 
-FINAL_PORT=$(awk -F'=' '/^port[[:space:]]*=/ { gsub(/[^0-9]/, "", $2); print $2; exit }' /etc/myssh-mcp/config.toml)
-FINAL_PORT="${FINAL_PORT:-8765}"
-UFW_ACTIVE=0
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  UFW_ACTIVE=1
-fi
-if [ "$OPEN_FW" = 1 ]; then
-  if [ "$UFW_ACTIVE" = 1 ]; then
-    ufw allow "${FINAL_PORT}/tcp"
-  else
-    echo "ufw is not active — no firewall rule added (check your cloud provider's firewall too)."
-  fi
-elif [ "$UFW_ACTIVE" = 1 ]; then
-  echo
-  echo "NOTE: ufw is active. To reach MySSH-MCP over HTTP run:  ufw allow ${FINAL_PORT}/tcp"
-fi
-
 echo
-echo "Done. Your API key and copy-paste connection instructions:"
+echo "Done. Server address (IP:port), API key and copy-paste connection instructions:"
 echo "    sudo cat /home/MCP_MySSH_APIKey.txt"
 echo "Live audit log:"
 echo "    sudo tail -f /server_log/claude_log.txt"

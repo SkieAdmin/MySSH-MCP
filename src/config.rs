@@ -12,7 +12,7 @@ pub const SERVICE_NAME: &str = "myssh-mcp";
 pub const UNIT_PATH: &str = "/etc/systemd/system/myssh-mcp.service";
 pub const LOGROTATE_PATH: &str = "/etc/logrotate.d/myssh-mcp";
 pub const BACKUP_DIR: &str = "/var/backups/myssh-mcp";
-pub const DEFAULT_PORT: u16 = 8765;
+pub const DEFAULT_PORT: u16 = 4040;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]

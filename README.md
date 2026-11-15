@@ -32,18 +32,30 @@ adds a temporary swap file on small VPS (under 2 GB RAM), then runs `myssh-mcp s
 2. installs `/usr/local/bin/myssh-mcp`
 3. **generates a 256-bit API key**. Only its SHA-256 goes into the config. The plain key goes to
    `/home/MCP_MySSH_APIKey.txt` (mode 600) together with connection instructions for every client.
-4. installs and starts the `myssh-mcp` systemd service (`User=root`, `Restart=always`, enabled at boot)
-5. installs log rotation (`/etc/logrotate.d/myssh-mcp`)
+4. **opens the port in ufw**: always runs `ufw allow 4040/tcp`, whether ufw is active or not.
+   If ufw is inactive, the rule is saved and applies when ufw is enabled. ufw is installed if
+   missing but never switched on by the installer.
+5. installs and starts the `myssh-mcp` systemd service (`User=root`, `Restart=always`, enabled at boot)
+6. installs log rotation (`/etc/logrotate.d/myssh-mcp`)
+
+The top of `/home/MCP_MySSH_APIKey.txt` looks like this:
+
+```text
+SERVER=10.50.0.1:4040
+API_KEY=msmcp_3f9c...
+MCP_URL=http://10.50.0.1:4040/mcp
+```
 
 Re-running `./install.sh` upgrades in place and **keeps the existing key**.
 
 | Option | Meaning |
 |---|---|
-| `--port 8765` | listen port |
+| `--port 4040` | listen port (default 4040; also opened in ufw) |
 | `--bind 0.0.0.0` | listen address (`127.0.0.1` behind a reverse proxy / SSH tunnel) |
-| `--public-host my.vps.com` | host/IP written into the connection guide (auto-detected otherwise) |
+| `--public-host 10.50.0.1` | IP/hostname written into the key file (auto-detected otherwise) |
 | `--new-key` | force a new API key |
-| `--open-firewall` | `ufw allow <port>/tcp` if ufw is active |
+
+If your VPS provider has its own firewall (security group), open TCP 4040 there as well.
 
 ## Connect your AI
 
@@ -51,7 +63,7 @@ Re-running `./install.sh` upgrades in place and **keeps the existing key**.
 Codex CLI, Cursor, VS Code and a `curl` test. For example, Claude Code:
 
 ```bash
-claude mcp add --transport http --scope user myssh http://YOUR_VPS_IP:8765/mcp \
+claude mcp add --transport http --scope user myssh http://10.50.0.1:4040/mcp \
   --header "Authorization: Bearer msmcp_xxxxxxxx..."
 ```
 
@@ -114,7 +126,7 @@ sudo myssh-mcp check-sql "DELETE FROM users"     # DENIED: DELETE without WHERE 
 One line per event with an exact local timestamp, the client IP and the full command:
 
 ```text
-[2026-11-15 14:03:21.004 +08:00] [SYSTEM ] client=- msg="MySSH-MCP v1.0.0 listening on http://0.0.0.0:8765/mcp (audit log: /server_log/claude_log.txt)"
+[2026-11-15 14:03:21.004 +08:00] [SYSTEM ] client=- msg="MySSH-MCP v1.0.0 listening on http://0.0.0.0:4040/mcp (audit log: /server_log/claude_log.txt)"
 [2026-11-15 14:03:22.123 +08:00] [GRANTED] client=203.0.113.7 tool=execute_command cmd="apt-get install -y nginx" cwd="/root" timeout=120s
 [2026-11-15 14:03:41.870 +08:00] [RESULT ] client=203.0.113.7 tool=execute_command exit=0 signal=- duration_ms=19745 timed_out=false truncated=false stdout_bytes=5120 stderr_bytes=0
 [2026-11-15 14:04:02.511 +08:00] [DENIED ] client=203.0.113.7 tool=execute_command cmd="rm -rf ./" cwd="/root" reason="recursive delete of /, ., .., * or ~ is blocked"
@@ -151,8 +163,9 @@ myssh-mcp check-sql "<sql>"     test a query against the policy
   prompt-injected AIs from wrecking the server. It cannot stop a determined human with root.
   Anything the policy does not block runs as root.
 - **Plain HTTP sends the API key unencrypted.** On the open internet, use the SSH transport or put
-  HTTPS in front (e.g. Caddy `reverse_proxy 127.0.0.1:8765` with `bind = "127.0.0.1"`). Open the port
-  only to the IPs you need.
+  HTTPS in front (e.g. Caddy `reverse_proxy 127.0.0.1:4040` with `bind = "127.0.0.1"`). Setup opens
+  4040 to everyone in ufw. To restrict it, replace the rule, e.g.
+  `ufw delete allow 4040/tcp && ufw allow from <your-ip> to any port 4040 proto tcp`.
 - 10 failed API keys in 10 minutes ban the IP for 15 minutes (logged as `AUTHFAIL`).
 - The AI cannot read the key file or change MySSH-MCP's own files, service or log. For tamper-proof
   records, also ship the log off the server (rsyslog, Loki, ...).
