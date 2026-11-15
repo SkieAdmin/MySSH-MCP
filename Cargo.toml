@@ -1,0 +1,32 @@
+[package]
+name = "myssh-mcp"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Guarded MCP server that lets AI assistants (Claude, Codex, ...) manage an Ubuntu/Linux VPS safely"
+readme = "README.md"
+
+[[bin]]
+name = "myssh-mcp"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+sha2 = "0.10"
+getrandom = "0.2"
+regex = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
