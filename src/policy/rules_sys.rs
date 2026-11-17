@@ -498,8 +498,28 @@ impl Policy {
             }
             ("compose", _) => self.rule_compose(rest),
             ("run" | "create", _) => self.rule_container_create(rest),
+            ("exec", _) => self.rule_docker_exec(rest, c),
             _ => Ok(()),
         }
+    }
+
+    /// `docker exec [opts] CONTAINER mysql -e "..."`: apply the database client rules inside containers.
+    fn rule_docker_exec(&self, rest: &[String], c: &Ctx) -> Verdict {
+        const VALUE: &[&str] = &["-u", "--user", "-e", "--env", "-w", "--workdir", "--env-file", "--detach-keys"];
+        let mut i = 0;
+        while i < rest.len() && rest[i].starts_with('-') {
+            i += if VALUE.contains(&rest[i].as_str()) { 2 } else { 1 };
+        }
+        let Some(exe) = rest.get(i + 1) else { return Ok(()) };
+        let prog = basename(exe);
+        if matches!(
+            prog,
+            "mysql" | "mariadb" | "psql" | "sqlite3" | "mysqladmin" | "mariadb-admin" | "dropdb" | "redis-cli"
+        ) {
+            let inner = Ctx { prog, exe, args: &rest[i + 2..], cwd: c.cwd, via_xargs: false, depth: c.depth };
+            return self.rule_db_cli(&inner);
+        }
+        Ok(())
     }
 
     fn rule_compose(&self, args: &[String]) -> Verdict {

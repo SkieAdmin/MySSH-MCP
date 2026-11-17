@@ -1,6 +1,7 @@
 //! MCP tools exposed to the AI. Every tool call is policy-checked and audit-logged.
 
 mod db;
+mod dbbackup;
 mod fs;
 mod system;
 
@@ -114,6 +115,9 @@ pub async fn call(st: &AppState, name: &str, args: &Value, client: &str) -> Tool
         "service_control" => system::service_control(st, args, client).await,
         "docker" => db::docker(st, args, client).await,
         "database_query" => db::database_query(st, args, client).await,
+        "database_backup" => db::database_backup(st, args, client).await,
+        "database_backups" => db::database_backups(st, args, client).await,
+        "database_restore" => db::database_restore(st, args, client).await,
         other => {
             st.audit.log(Kind::Error, client, other, "msg=\"unknown tool\"");
             ToolOutput::err(format!("unknown tool `{other}`"))
@@ -255,8 +259,8 @@ pub fn definitions() -> Value {
         },
         {
             "name": "database_query",
-            "title": "Run SQL query",
-            "description": "Run SQL against a local database using its CLI client. engine=mysql (MySQL/MariaDB; root via unix socket when no user is given), postgres (runs as the `postgres` system user when no user/host is given) or sqlite (needs `path`). DROP DATABASE/TABLE, TRUNCATE, DELETE/UPDATE without WHERE, COPY ... PROGRAM, INTO OUTFILE and shell escapes are blocked.",
+            "title": "Run SQL query (auto-backup)",
+            "description": "Run SQL against a database with its CLI client. ALWAYS use this tool (not execute_command) for database changes: before any query that changes data it automatically backs up the database (mysqldump / pg_dump / sqlite .backup) and returns the backup id so the change can be reverted with database_restore. Destructive statements (DROP, TRUNCATE, DELETE/UPDATE without WHERE) are allowed only after that backup succeeded. engine=mysql (MySQL/MariaDB; root via unix socket when no user is given), postgres (peer auth as the `postgres` system user when no user/host is given) or sqlite (needs `path`). Set `container` for databases running in Docker. Shell escapes, COPY ... PROGRAM and INTO OUTFILE are always blocked. Tip: pass `database` so only that database is backed up (MySQL without it backs up all databases).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -267,10 +271,59 @@ pub fn definitions() -> Value {
                     "password": { "type": "string" },
                     "host": { "type": "string" },
                     "port": { "type": "integer" },
+                    "container": { "type": "string", "description": "Docker container running the database (uses docker exec)" },
                     "path": { "type": "string", "description": "SQLite database file (absolute path)" },
                     "timeout_secs": { "type": "integer", "minimum": 1 }
                 },
                 "required": ["engine", "query"]
+            },
+            "annotations": { "destructiveHint": true }
+        },
+        {
+            "name": "database_backup",
+            "title": "Back up a database",
+            "description": "Create a backup of a database right now (same connection arguments as database_query). Returns the backup id for database_restore. Backups are kept in /var/backups/myssh-mcp/db (14 days by default).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "engine": { "type": "string", "enum": ["mysql", "mariadb", "postgres", "sqlite"] },
+                    "database": { "type": "string", "description": "Database to back up (MySQL: omit = all databases)" },
+                    "user": { "type": "string" },
+                    "password": { "type": "string" },
+                    "host": { "type": "string" },
+                    "port": { "type": "integer" },
+                    "container": { "type": "string" },
+                    "path": { "type": "string", "description": "SQLite database file" }
+                },
+                "required": ["engine"]
+            }
+        },
+        {
+            "name": "database_backups",
+            "title": "List database backups",
+            "description": "List database backups (automatic and manual), newest first, with id, time, database, size and the query that triggered them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "engine": { "type": "string", "description": "Filter by engine" },
+                    "database": { "type": "string", "description": "Filter by database name" }
+                }
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "database_restore",
+            "title": "Restore (revert) a database",
+            "description": "Revert a database to a backup from database_backups / database_query. MySQL: the database is dropped and recreated from the backup. PostgreSQL: objects in the backup are dropped and recreated in one transaction. SQLite: the file content is replaced. A safety backup of the current state is taken first, so a restore can itself be undone. Only restore when the user wants to undo changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "backup_id": { "type": "string" },
+                    "user": { "type": "string", "description": "Override the user stored with the backup" },
+                    "password": { "type": "string", "description": "Password, if the database needs one (never stored)" },
+                    "force": { "type": "boolean", "description": "Restore even if the safety backup of the current state fails (e.g. the database was dropped)" }
+                },
+                "required": ["backup_id"]
             },
             "annotations": { "destructiveHint": true }
         }

@@ -297,7 +297,10 @@ curl -s __URL__ \
   firewall / security group, open TCP __PORT__ there too.
 * 10 wrong keys within 10 minutes => that IP is banned for 15 minutes.
 * Tools: execute_command, read_file, write_file, list_directory, system_info,
-  service_control, docker, database_query.
+  service_control, docker, database_query, database_backup, database_backups,
+  database_restore.
+* Every data-changing database_query is preceded by an automatic backup in
+  /var/backups/myssh-mcp/db; ask the AI to "revert with database_restore".
 "#;
 
 fn key_file_text(key: &str, cfg: &Config) -> String {
@@ -345,6 +348,7 @@ pub fn run_setup(o: SetupOpts) -> Result<(), String> {
     }
     touch_private(&log)?;
     private_dir(config::BACKUP_DIR)?;
+    private_dir(config::DB_BACKUP_DIR)?;
 
     println!("[2/7] Installing binary to {}", config::BINARY_PATH);
     install_binary()?;

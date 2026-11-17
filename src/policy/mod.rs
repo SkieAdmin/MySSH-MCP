@@ -15,6 +15,7 @@ mod rules_fs;
 mod rules_sys;
 pub mod shell;
 mod sql;
+pub use sql::{dropped_database, sql_destructive, sql_is_read_only};
 #[cfg(test)]
 mod tests;
 

@@ -7,10 +7,12 @@ safety policy in front of every command and a complete audit log.
 - **One-command install**: builds, installs, **generates the API key** and writes it with
   copy-paste connection instructions to **`/home/MCP_MySSH_APIKey.txt`**.
 - **Blocks dangerous commands** such as `rm -rf ./`, `rm -rf /`, `mkfs`, `dd of=/dev/sda`, fork bombs,
-  `chmod -R 777 /`, stopping SSH, firewall flushes, `curl | bash`, `DROP DATABASE`, `docker volume rm`, ...
+  `chmod -R 777 /`, stopping SSH, firewall flushes, `curl | bash`, `docker volume rm`, ...
 - **Logs everything** (granted, denied, results, failed logins) with an exact timestamp to
   **`/server_log/claude_log.txt`**.
 - **Docker, databases (MySQL/MariaDB, PostgreSQL, SQLite) and systemd services** are available as tools.
+- **Databases are backed up automatically before every change** and can be **reverted** with one
+  tool call (`database_restore`).
 
 > Linux only (tested target: Ubuntu 20.04+ / Debian 11+ with systemd).
 
@@ -84,7 +86,10 @@ claude mcp add myssh-ssh -- ssh -T root@YOUR_VPS_IP /usr/local/bin/myssh-mcp std
 | `system_info` | OS, kernel, uptime, load, RAM, disks, listening ports, Docker containers, failed units |
 | `service_control` | `systemctl status/start/stop/restart/reload/enable/disable`, journal logs |
 | `docker` | docker CLI with an argument array (no shell), including `docker compose` |
-| `database_query` | SQL via `mysql`/`mariadb`, `psql` (peer auth as `postgres`) or `sqlite3` |
+| `database_query` | SQL via `mysql`/`mariadb`, `psql` (peer auth as `postgres`) or `sqlite3`, on the host or in a Docker container. **Backs up automatically before any data change** |
+| `database_backup` | take a backup now |
+| `database_backups` | list backups (id, time, database, size, the query that triggered it) |
+| `database_restore` | **revert** a database to a backup (takes a safety backup of the current state first) |
 
 ## What gets blocked
 
@@ -103,7 +108,7 @@ inside `python -c`, `perl -e` and similar.
 | Packages | removing `openssh-server`, `systemd`, `libc6`, `sudo`, `apt`, the running kernel, ...; wildcard removals |
 | Evasion | `curl … \| bash`, `bash <(curl …)`, `base64 -d \| sh`, `eval "$(… base64 -d)"`, `$(echo rm) -rf`, `$CMD …` |
 | Docker | `system prune`, `volume rm/prune`, `container prune`, `compose down -v`, `--privileged`, `-v /:/host` |
-| Databases | `DROP DATABASE/TABLE`, `TRUNCATE`, `DELETE`/`UPDATE` without `WHERE`, `COPY … PROGRAM`, `INTO OUTFILE`, `\!` shell escapes, `FLUSHALL`, `dropdb` |
+| Databases | Always: `COPY … PROGRAM`, `INTO OUTFILE`, `\!` shell escapes, `SHUTDOWN`, dropping the DB root user. Without a backup (shell commands such as `mysql -e`, `psql -c`, `docker exec … mysql`): `DROP DATABASE/TABLE`, `TRUNCATE`, `DELETE`/`UPDATE` without `WHERE`, `FLUSHALL`, `dropdb`. These run through `database_query` once its automatic backup succeeds |
 | Self-protection | anything that modifies MySSH-MCP's config, audit log, binary, service, backups, or reads the API key file |
 
 Normal admin work stays allowed: `apt install`, `systemctl restart nginx`, `rm -rf ./build`,
@@ -120,6 +125,43 @@ sudo myssh-mcp check "rm -rf ./"                 # DENIED: recursive delete of /
 sudo myssh-mcp check "systemctl restart nginx"   # ALLOWED
 sudo myssh-mcp check-sql "DELETE FROM users"     # DENIED: DELETE without WHERE ...
 ```
+
+## Database backups and revert
+
+The AI can make any database change, including `DROP TABLE` or `DELETE FROM users`, as long as it
+goes through `database_query`. Every data-changing query is backed up first:
+
+1. Read-only queries (`SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, ...) run directly. No backup is taken.
+2. Any other query triggers a backup of the target database first:
+   | Engine | Backup | Restore |
+   |---|---|---|
+   | MySQL / MariaDB | `mysqldump --single-transaction --routines --triggers` → `.sql.gz` | drop the database and re-import it |
+   | PostgreSQL | `pg_dump --format=custom` → `.dump` | `pg_restore --clean --single-transaction` (recreates the DB if it was dropped) |
+   | SQLite | `.backup` → `.sqlite` | `.restore` |
+
+   This also works inside Docker (`"container": "my-db"`, via `docker exec`). `DROP DATABASE x`
+   backs up `x`.
+3. If the backup fails, **the query is not run**. `DROP`, `TRUNCATE`, and `DELETE`/`UPDATE` without
+   `WHERE` are only allowed after a successful backup.
+4. The AI gets the backup id back, e.g.
+   `🛟 Backup 20261115-140322-123-mysql-shop (4.2 MB) taken before this change`.
+5. To undo, ask the AI to *"revert shop to the backup before that change"*. It calls
+   `database_restore`, which first takes a **safety backup of the current state**, so a restore can
+   be undone too.
+
+Backups are stored in `/var/backups/myssh-mcp/db` (root only). The AI cannot delete them with shell
+commands. They are deleted after 14 days. Non-destructive writes within 5 minutes reuse the latest
+backup instead of dumping again. You can change both, and the minimum free disk space, under
+`[database]` in the config. Backups are logged:
+
+```text
+[2026-11-15 14:03:22.101 +08:00] [BACKUP ] client=203.0.113.7 tool=database_backup status=OK id=20261115-140322-101-mysql-shop target="mysql database `shop`" size_bytes=4404019 reason="before query: DELETE FROM orders WHERE created < '2024-01-01'"
+[2026-11-15 14:20:05.877 +08:00] [RESTORE] client=203.0.113.7 tool=database_restore status=OK id=20261115-140322-101-mysql-shop target="mysql database `shop`"
+```
+
+> SQL typed into shell commands (`mysql -e`, `psql -c`, `docker exec … psql`) gets **no** backup.
+> Destructive statements there stay blocked, and the AI is told to use `database_query`.
+> Redis `FLUSHALL` / Mongo `dropDatabase()` have no automatic backup, so they stay blocked.
 
 ## Audit log: `/server_log/claude_log.txt`
 
@@ -191,7 +233,7 @@ src/
   http.rs        MCP Streamable HTTP transport + API-key auth + brute-force ban
   stdio.rs       MCP over stdin/stdout
   mcp.rs         JSON-RPC / MCP protocol (initialize, tools/list, tools/call, ...)
-  tools/         execute_command, files, system, docker, database tools
+  tools/         execute_command, files, system, docker, database tools, database backups/restore
   policy/        safety policy: shell parser, path rules, program rules, SQL rules, tests
   exec.rs        process runner (timeouts, process-group kill, output caps)
   audit.rs       audit log

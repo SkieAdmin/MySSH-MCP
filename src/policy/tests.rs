@@ -186,9 +186,12 @@ fn blocks_destructive_sql() {
         "redis-cli FLUSHALL",
         "mysqladmin drop shop",
         "dropdb shop",
+        "docker exec -i db mysql -uroot -e 'DROP DATABASE shop'",
+        "docker exec pg psql -U postgres -c \"DELETE FROM users\"",
     ] {
         assert_denied(&p, cmd);
     }
+    assert_allowed(&p, "docker exec pg psql -U postgres -c 'SELECT count(*) FROM users'");
     for sql in [
         "DELETE FROM users",
         "update users set admin = 1",

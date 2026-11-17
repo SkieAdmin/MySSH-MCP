@@ -12,6 +12,7 @@ pub const SERVICE_NAME: &str = "myssh-mcp";
 pub const UNIT_PATH: &str = "/etc/systemd/system/myssh-mcp.service";
 pub const LOGROTATE_PATH: &str = "/etc/logrotate.d/myssh-mcp";
 pub const BACKUP_DIR: &str = "/var/backups/myssh-mcp";
+pub const DB_BACKUP_DIR: &str = "/var/backups/myssh-mcp/db";
 pub const DEFAULT_PORT: u16 = 4040;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -20,7 +21,42 @@ pub struct Config {
     pub server: ServerConfig,
     pub logging: LoggingConfig,
     pub limits: LimitsConfig,
+    pub database: DatabaseConfig,
     pub policy: PolicyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DatabaseConfig {
+    /// Back up the database before every query that changes data (database_query tool).
+    pub backup_before_write: bool,
+    /// Allow DROP / TRUNCATE / DELETE-or-UPDATE-without-WHERE through database_query once the
+    /// automatic backup succeeded (revert with database_restore).
+    pub allow_destructive_with_backup: bool,
+    /// Refuse a data-changing query when its backup fails.
+    pub require_backup: bool,
+    /// Reuse a backup of the same database taken within this many seconds for non-destructive
+    /// writes (INSERT / UPDATE ... WHERE). Destructive statements always get a fresh backup.
+    pub reuse_backup_within_secs: u64,
+    /// Delete backups older than this many days (0 = keep forever).
+    pub keep_days: u64,
+    /// Do not start a backup when less than this much disk space is free.
+    pub min_free_mb: u64,
+    pub backup_timeout_secs: u64,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            backup_before_write: true,
+            allow_destructive_with_backup: true,
+            require_backup: true,
+            reuse_backup_within_secs: 300,
+            keep_days: 14,
+            min_free_mb: 1024,
+            backup_timeout_secs: 1800,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +256,24 @@ max_read_bytes = {mr}
 max_concurrent_commands = {mc}
 default_cwd = {cwd}
 
+[database]
+# The database_query tool backs up the database (mysqldump / pg_dump / sqlite .backup) to
+# /var/backups/myssh-mcp/db before any query that changes data. Revert with database_restore.
+backup_before_write = {db_backup}
+# DROP / TRUNCATE / DELETE or UPDATE without WHERE are allowed through database_query
+# only after that backup succeeded. (SQL typed into shell commands never gets a backup,
+# so destructive statements there stay blocked unless allow_destructive_sql = true.)
+allow_destructive_with_backup = {db_destructive}
+# Refuse a data-changing query if its backup failed.
+require_backup = {db_require}
+# Non-destructive writes reuse a backup of the same database younger than this (seconds).
+reuse_backup_within_secs = {db_reuse}
+# Delete database backups older than N days (0 = keep forever).
+keep_days = {db_keep}
+# Skip backups (and therefore refuse writes) when less than this much disk is free.
+min_free_mb = {db_free}
+backup_timeout_secs = {db_timeout}
+
 [policy]
 # Built-in protections that can NOT be disabled: MySSH-MCP's own files/service,
 # fork bombs, disk formatting/wiping, recursive deletes of /, ., .., *, ~ and top-level dirs.
@@ -228,7 +282,8 @@ default_cwd = {cwd}
 allow_reboot = {allow_reboot}
 # Allow `curl ... | bash` style installers.
 allow_remote_script_pipe = {allow_pipe}
-# Allow DROP DATABASE/TABLE, TRUNCATE, DELETE/UPDATE without WHERE, FLUSHALL.
+# Allow DROP DATABASE/TABLE, TRUNCATE, DELETE/UPDATE without WHERE, FLUSHALL everywhere,
+# even in shell commands WITHOUT a backup. Prefer [database] allow_destructive_with_backup.
 allow_destructive_sql = {allow_sql}
 # Allow `docker run --privileged`.
 allow_privileged_containers = {allow_priv}
@@ -262,6 +317,13 @@ extra_deny_patterns = {extra}
         mr = l.max_read_bytes,
         mc = l.max_concurrent_commands,
         cwd = q(&l.default_cwd),
+        db_backup = c.database.backup_before_write,
+        db_destructive = c.database.allow_destructive_with_backup,
+        db_require = c.database.require_backup,
+        db_reuse = c.database.reuse_backup_within_secs,
+        db_keep = c.database.keep_days,
+        db_free = c.database.min_free_mb,
+        db_timeout = c.database.backup_timeout_secs,
         allow_reboot = p.allow_reboot,
         allow_pipe = p.allow_remote_script_pipe,
         allow_sql = p.allow_destructive_sql,
@@ -289,5 +351,7 @@ mod tests {
         assert_eq!(back.server.port, DEFAULT_PORT);
         assert_eq!(back.policy.protected_dirs, c.policy.protected_dirs);
         assert_eq!(back.policy.extra_deny_patterns, c.policy.extra_deny_patterns);
+        assert!(back.database.backup_before_write);
+        assert_eq!(back.database.keep_days, 14);
     }
 }

@@ -16,7 +16,10 @@ Denied calls return '⛔ DENIED' and are logged together with every other comman
 Never try to bypass a denial (encoding, scripts, other tools) — explain the situation to the user instead.\n\
 3. Inspect before you change. Validate configs before reloading (nginx -t, sshd -t, docker compose config). \
 write_file backs files up automatically to /var/backups/myssh-mcp.\n\
-4. Use systemd units or `nohup ... &` for long-running processes; use timeout_secs for slow commands.";
+4. Databases: make every change with database_query (never mysql/psql via execute_command). It backs the database up \
+before any data-changing query and returns a backup id; if something goes wrong, revert with database_restore \
+(list backups with database_backups). Tell the user the backup id after changing data.\n\
+5. Use systemd units or `nohup ... &` for long-running processes; use timeout_secs for slow commands.";
 
 fn error(id: Value, code: i64, msg: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": msg } })

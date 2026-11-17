@@ -20,6 +20,8 @@ pub enum Kind {
     Denied,
     Result,
     AuthFail,
+    Backup,
+    Restore,
     System,
     Error,
 }
@@ -31,6 +33,8 @@ impl Kind {
             Kind::Denied => "DENIED ",
             Kind::Result => "RESULT ",
             Kind::AuthFail => "AUTHFAIL",
+            Kind::Backup => "BACKUP ",
+            Kind::Restore => "RESTORE",
             Kind::System => "SYSTEM ",
             Kind::Error => "ERROR  ",
         }
